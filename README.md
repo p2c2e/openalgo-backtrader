@@ -24,6 +24,36 @@ from openalgo_bt.feeds.oa import OAData
   - `feeds/oa.py` - OAData for Backtrader feeds
   - `brokers/oabroker.py` - OABroker for Backtrader brokers
 
+
+### Sample Store/Broker Creation
+Here is how to setup a Store/Broker (example tested with Zerodha backend at OpenAlgo). Both blocks are for "LIVE" setup
+```python
+from openalgo_bt.stores.oa import OAStore
+store = OAStore()
+broker = store.getbroker(
+    product="MIS", 
+    strategy="Live Consistent Trend Bracket", 
+    debug=True,
+    simulate_fills=False,  # Use real broker for live trading
+    use_funds=False        # Use local cash management
+)
+cerebro.setbroker(broker)
+```
+And to setup a Data (or multiple for that matter)
+
+```python
+data = OAData(
+  symbol=symbol,
+  interval="1m",                   # Explicit OpenAlgo interval to bypass timeframe/compression mapping
+  compression=1,                   # 1-minute bars
+  fromdate=datetime.now() - timedelta(days=1),  # Some historical data for warmup
+  live=True,                       # Enable live streaming
+  ws_url=ws_url,
+  ws_mode=2,                       # Quote mode
+)
+cerebro.adddata(data, name=symbol)
+```
+
 ## Requirements
 
 - Python 3.8+
