@@ -1,6 +1,6 @@
 [project]
 name = "openalgo-backtrader"
-version = "0.1.0"
+version = "0.1.4"
 description = "Backtrader integration for OpenAlgo (India) - stores, feeds, and brokers"
 authors = [
     { name = "Sudharsan Rangarajan", email = "sudharsan.rangarajan@gmail.com" }
@@ -21,9 +21,12 @@ Homepage = "https://github.com/p2c2e/openalgo-backtrader"
 [tool.uv]
 # No special config needed for basic packaging
 
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+# [build-system]
+# requires = ["setuptools"]
+# build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["openalgo_bt"]
+where = ["src"]
