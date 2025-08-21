@@ -46,6 +46,360 @@ from openalgo_bt.stores.oa import OAStore  # type: ignore
 TIMEFRAME_DAYS = getattr(getattr(bt, "TimeFrame", object), "Days", 0)
 
 
+# -------------
+# Shared WebSocket Hub (keyed by ws_url) to multiplex subscriptions
+# -------------
+class _WSConnection:
+    def __init__(self, ws_url: str):
+        self.ws_url = ws_url
+        self.ws = None
+        self.thread: Optional[threading.Thread] = None
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.connected = False
+        self.api_key = os.getenv("OPENALGO_API_KEY")
+        # Map of (exchange, symbol) -> set of OAData consumers
+        self.subscribers: Dict[tuple[str, str], set] = {}
+        # Reverse map of OAData -> (exchange, symbol, mode)
+        self.consumer_topics: Dict[Any, tuple[str, str, int]] = {}
+
+    def ensure_started(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.stop.clear()
+        t = threading.Thread(target=self._run, daemon=True)
+        self.thread = t
+        t.start()
+
+    def _run(self) -> None:
+        try:
+            import websocket  # type: ignore
+        except Exception:
+            # websocket-client not installed
+            return
+
+        conn = self
+
+        def on_open(ws):
+            with conn.lock:
+                conn.connected = True
+                # Authenticate once per connection
+                try:
+                    if conn.api_key:
+                        ws.send(json.dumps({"action": "authenticate", "api_key": conn.api_key}))
+                except Exception:
+                    pass
+                # Subscribe to all current topics
+                topics = set(conn.consumer_topics.values())  # (exchange, symbol, mode)
+            for exch, sym, mode in topics:
+                try:
+                    ws.send(json.dumps({
+                        "action": "subscribe",
+                        "symbol": sym,
+                        "exchange": exch,
+                        "mode": int(mode),
+                    }))
+                except Exception:
+                    pass
+
+        def on_message(ws, message):
+            if conn.stop.is_set():
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                return
+
+            try:
+                msg = json.loads(message)
+            except Exception:
+                return
+
+            # Ping/Pong
+            if isinstance(msg, dict) and msg.get("type") == "ping":
+                try:
+                    ws.send(json.dumps({"type": "pong"}))
+                except Exception:
+                    pass
+                return
+
+            exch, sym = conn._extract_symbol_exchange(msg)
+            if not sym:
+                return
+
+            price = conn._parse_price(msg)
+            if price is None:
+                return
+
+            ts = conn._extract_timestamp(msg)
+            dt_utc = conn._to_dt_utc(ts)
+
+            key = (exch or "NSE", sym)
+            with conn.lock:
+                consumers = list(conn.subscribers.get(key, set()))
+            for c in consumers:
+                try:
+                    # Each OAData aggregates ticks into its own 1m bar
+                    c._handle_tick(price, dt_utc)
+                except Exception:
+                    pass
+
+        def on_error(ws, error):
+            # Backoff a bit on errors
+            time.sleep(1.0)
+
+        def on_close(ws, close_status_code, close_msg):
+            with conn.lock:
+                conn.connected = False
+
+        while not conn.stop.is_set():
+            try:
+                conn.ws = websocket.WebSocketApp(
+                    conn.ws_url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                conn.ws.run_forever()
+            except Exception:
+                pass
+            finally:
+                with conn.lock:
+                    conn.ws = None
+                    conn.connected = False
+            # Reconnect delay
+            if not conn.stop.is_set():
+                time.sleep(1.0)
+
+    def subscribe(self, exchange: str, symbol: str, mode: int, consumer: Any) -> None:
+        self.ensure_started()
+        key = (exchange or "NSE", symbol)
+        should_send = False
+        ws = None
+        with self.lock:
+            s = self.subscribers.get(key)
+            if s is None:
+                s = set()
+                self.subscribers[key] = s
+            if consumer not in s:
+                s.add(consumer)
+            # Track the topic for this consumer
+            self.consumer_topics[consumer] = (key[0], key[1], int(mode))
+            # Notify LIVE for this consumer immediately (mirrors original behavior)
+            try:
+                if not getattr(consumer, "_live_started", False) and hasattr(consumer, "put_notification"):
+                    consumer.put_notification(consumer.LIVE)  # type: ignore[attr-defined]
+                    setattr(consumer, "_live_started", True)
+            except Exception:
+                pass
+            ws = self.ws
+            # If first subscriber for this key and connection is active, send subscribe immediately
+            should_send = self.connected and len(s) == 1
+        if should_send and ws:
+            try:
+                ws.send(json.dumps({
+                    "action": "subscribe",
+                    "symbol": key[1],
+                    "exchange": key[0],
+                    "mode": int(mode),
+                }))
+            except Exception:
+                pass
+
+    def unsubscribe(self, consumer: Any) -> None:
+        to_unsub: List[tuple[str, str, int]] = []
+        ws = None
+        connected = False
+        with self.lock:
+            topic = self.consumer_topics.pop(consumer, None)
+            if topic:
+                key = (topic[0], topic[1])
+                s = self.subscribers.get(key)
+                if s and consumer in s:
+                    s.discard(consumer)
+                    if len(s) == 0:
+                        # No more consumers for this symbol on this connection
+                        self.subscribers.pop(key, None)
+                        to_unsub.append((key[0], key[1], topic[2]))
+            ws = self.ws
+            connected = self.connected
+
+        for exch, sym, mode in to_unsub:
+            if connected and ws:
+                try:
+                    ws.send(json.dumps({
+                        "action": "unsubscribe",
+                        "symbol": sym,
+                        "exchange": exch,
+                        "mode": int(mode),
+                    }))
+                except Exception:
+                    pass
+
+    def is_empty(self) -> bool:
+        with self.lock:
+            return len(self.consumer_topics) == 0
+
+    def close(self) -> None:
+        with self.lock:
+            self.stop.set()
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+        if self.thread:
+            try:
+                self.thread.join(timeout=3.0)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _extract_symbol_exchange(msg: Any) -> tuple[Optional[str], Optional[str]]:
+        sym = None
+        exch = None
+
+        # Direct fields
+        if isinstance(msg, dict):
+            for k in ("symbol", "s"):
+                v = msg.get(k)
+                if isinstance(v, str):
+                    sym = v
+                    break
+            if exch is None:
+                for k in ("exchange", "e"):
+                    v = msg.get(k)
+                    if isinstance(v, str):
+                        exch = v
+                        break
+
+            # Instrument dict shape
+            inst = msg.get("instrument")
+            if isinstance(inst, dict):
+                if isinstance(inst.get("symbol"), str) and not sym:
+                    sym = inst.get("symbol")
+                if isinstance(inst.get("exchange"), str) and not exch:
+                    exch = inst.get("exchange")
+
+            # Nested 'data'
+            d = msg.get("data")
+            if isinstance(d, dict):
+                if sym is None:
+                    for k in ("symbol", "s"):
+                        v = d.get(k)
+                        if isinstance(v, str):
+                            sym = v
+                            break
+                if exch is None:
+                    for k in ("exchange", "e"):
+                        v = d.get(k)
+                        if isinstance(v, str):
+                            exch = v
+                            break
+
+        # If combined in "NSE:RELIANCE"
+        if isinstance(sym, str) and ":" in sym and not exch:
+            parts = sym.split(":", 1)
+            if len(parts) == 2:
+                exch = parts[0]
+                sym = parts[1]
+
+        return (exch or "NSE"), sym
+
+    @staticmethod
+    def _parse_price(msg: Any) -> Optional[float]:
+        if not isinstance(msg, dict):
+            return None
+        # Try direct fields
+        for k in ("ltp", "last_price", "price", "close", "p"):
+            v = msg.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        # Try nested 'data'
+        d = msg.get("data")
+        if isinstance(d, dict):
+            for k in ("ltp", "last_price", "price", "close", "p"):
+                v = d.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+        return None
+
+    @staticmethod
+    def _extract_timestamp(msg: Any) -> Any:
+        ts = None
+        for k in ("timestamp", "ts", "time", "t"):
+            if isinstance(msg.get(k), (int, float, str)):
+                ts = msg.get(k)
+                break
+        if ts is None and isinstance(msg.get("data"), dict):
+            d = msg["data"]
+            for k in ("timestamp", "ts", "time", "t"):
+                if isinstance(d.get(k), (int, float, str)):
+                    ts = d.get(k)
+                    break
+        return ts
+
+    @staticmethod
+    def _to_dt_utc(ts: Any) -> datetime:
+        try:
+            if isinstance(ts, (int, float)):
+                val = float(ts)
+                if val > 1e12:  # ms
+                    return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+                else:
+                    return datetime.fromtimestamp(val, tz=timezone.utc)
+            elif isinstance(ts, str):
+                try:
+                    parsed = datetime.fromisoformat(ts)
+                    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                except Exception:
+                    return datetime.now(tz=timezone.utc)
+            else:
+                return datetime.now(tz=timezone.utc)
+        except Exception:
+            return datetime.now(tz=timezone.utc)
+
+
+class _WSHub:
+    def __init__(self):
+        self._conns: Dict[str, _WSConnection] = {}
+        self._lock = threading.Lock()
+
+    def subscribe(self, ws_url: str, exchange: str, symbol: str, mode: int, consumer: Any) -> None:
+        with self._lock:
+            conn = self._conns.get(ws_url)
+            if conn is None:
+                conn = _WSConnection(ws_url)
+                self._conns[ws_url] = conn
+        conn.subscribe(exchange, symbol, mode, consumer)
+
+    def unsubscribe(self, ws_url: str, consumer: Any) -> None:
+        with self._lock:
+            conn = self._conns.get(ws_url)
+        if not conn:
+            return
+        conn.unsubscribe(consumer)
+        if conn.is_empty():
+            conn.close()
+            with self._lock:
+                self._conns.pop(ws_url, None)
+
+
+# Global hub instance
+WS_HUB = _WSHub()
+
+
 class OAData(bt.feed.DataBase):  # type: ignore[misc]
     """
     OpenAlgo Backtrader Data Feed (historical-only for now).
@@ -69,6 +423,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
     lines = ("open", "high", "low", "close", "volume", "openinterest")
     params = (
         ("symbol", None),
+        ("symbols", None),
         ("exchange", None),
         ("timeframe", TIMEFRAME_DAYS),
         ("compression", 1),
@@ -99,6 +454,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         self._cur_minute = None
         self._cur_bar = None
         self._live_started = False
+        self._effective_symbol: Optional[str] = None
 
     # -------------
     # BT Lifecycle
@@ -114,6 +470,9 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
             host=self.p.host or os.getenv("OPENALGO_API_HOST"),
         )
 
+        # Resolve symbol from 'symbol' or 'symbols'
+        self._effective_symbol = self._resolve_symbol()
+
         # Determine date range
         todate: datetime = self.p.todate or datetime.now(tz=timezone.utc)
         fromdate: datetime = self.p.fromdate or (todate - timedelta(days=365))
@@ -127,7 +486,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
 
         # Fetch historical candles
         candles: List[Dict[str, Any]] = self._store.fetch_historical(  # type: ignore
-            symbol=self.p.symbol,
+            symbol=self._effective_symbol,
             start=fromdate,
             end_date=todate,
             interval=interval,
@@ -200,6 +559,45 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
     # -------------
     # Helpers
     # -------------
+    def _resolve_symbol(self) -> str:
+        """
+        Determine the effective symbol to use from params 'symbol' or 'symbols'.
+
+        Rules:
+          - Provide either 'symbol' (str) or 'symbols' (str or list/tuple with exactly one item).
+          - If both are provided, raise ValueError.
+          - If 'symbols' has more than one item, raise ValueError instructing to create one OAData per symbol.
+        """
+        sym = self.p.symbol
+        syms = self.p.symbols
+
+        # Disallow both
+        if sym and syms is not None:
+            raise ValueError("Provide either 'symbol' or 'symbols', not both.")
+
+        # Handle 'symbols'
+        if syms is not None:
+            if isinstance(syms, str):
+                s = syms.strip()
+                if not s:
+                    raise ValueError("'symbols' provided as empty string")
+                return s
+            if isinstance(syms, (list, tuple)):
+                if len(syms) == 0:
+                    raise ValueError("'symbols' list is empty")
+                if len(syms) > 1:
+                    raise ValueError("OAData supports one instrument per feed. Create one OAData per symbol.")
+                val = syms[0]
+                if not isinstance(val, str) or not val.strip():
+                    raise ValueError("Invalid symbol inside 'symbols' list")
+                return val.strip()
+            raise ValueError("'symbols' must be a string or a list/tuple of one string")
+
+        # Fallback to 'symbol'
+        if not sym or not isinstance(sym, str) or not sym.strip():
+            raise ValueError("You must provide 'symbol' (str) or 'symbols' (list[str] with one item)")
+        return sym.strip()
+
     @staticmethod
     def _to_naive_utc(dt: Any) -> Optional[datetime]:
         """
@@ -325,28 +723,22 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
     def _start_ws(self) -> None:
         ws_url = self.p.ws_url or os.getenv("WEBSOCKET_URL")
         if not ws_url:
-            # No websocket URL configured; skip live
             return
-        if self._ws_thread:
-            return
-        self._ws_stop.clear()
-        t = threading.Thread(target=self._ws_run, args=(ws_url,), daemon=True)
-        self._ws_thread = t
-        t.start()
+        symbol, exchange = self._split_symbol_exchange()
+        try:
+            WS_HUB.subscribe(ws_url=ws_url, exchange=exchange, symbol=symbol, mode=int(self.p.ws_mode), consumer=self)
+        except Exception:
+            # Swallow to avoid stopping Backtrader on WS issues
+            pass
 
     def _stop_ws(self) -> None:
         try:
-            self._ws_stop.set()
-            if self._ws:
-                try:
-                    self._ws.close()
-                except Exception:
-                    pass
-            if self._ws_thread:
-                self._ws_thread.join(timeout=3.0)
-        finally:
-            self._ws = None
-            self._ws_thread = None
+            ws_url = self.p.ws_url or os.getenv("WEBSOCKET_URL")
+            if ws_url:
+                WS_HUB.unsubscribe(ws_url=ws_url, consumer=self)
+        except Exception:
+            # Ensure stop never raises
+            pass
 
     def _ws_run(self, ws_url: str) -> None:
         try:
@@ -393,6 +785,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
 
             try:
                 msg = json.loads(message)
+                print(msg)
             except Exception:
                 return
 
@@ -566,9 +959,9 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
     def _split_symbol_exchange(self) -> tuple[str, str]:
         """
         Returns (symbol, exchange) for websocket subscription.
-        If self.p.symbol is like 'NSE:RELIANCE', exchange='NSE', symbol='RELIANCE' unless self.p.exchange overrides.
+        Accepts either 'symbol' or 'symbols' (length 1). If like 'NSE:RELIANCE', exchange='NSE', symbol='RELIANCE' unless self.p.exchange overrides.
         """
-        sym = self.p.symbol or ""
+        sym = (self._effective_symbol or self.p.symbol or "")
         exch = self.p.exchange
         if isinstance(sym, str) and ":" in sym:
             parts = sym.split(":", 1)

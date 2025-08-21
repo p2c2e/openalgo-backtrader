@@ -4,7 +4,7 @@ matplotlib.use("Agg")  # headless backend
 
 import backtrader as bt
 from datetime import datetime, timezone
-from bt.feeds.oa import OAData
+from openalgo_bt.feeds.oa import OAData
 
 
 class PrintBars(bt.Strategy):

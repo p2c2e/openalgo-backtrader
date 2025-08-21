@@ -7,8 +7,8 @@ import backtrader as bt
 from backtrader import TimeFrame
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from bt.stores.oa import OAStore
-from bt.feeds.oa import OAData
+from openalgo_bt.stores.oa import OAStore
+from openalgo_bt.feeds.oa import OAData
 
 
 class TestOABrokerStrategy(bt.Strategy):
