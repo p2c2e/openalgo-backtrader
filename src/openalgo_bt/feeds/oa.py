@@ -189,13 +189,14 @@ class _WSConnection:
                 s.add(consumer)
             # Track the topic for this consumer
             self.consumer_topics[consumer] = (key[0], key[1], int(mode))
-            # Notify LIVE for this consumer immediately (mirrors original behavior)
-            try:
-                if not getattr(consumer, "_live_started", False) and hasattr(consumer, "put_notification"):
-                    consumer.put_notification(consumer.LIVE)  # type: ignore[attr-defined]
-                    setattr(consumer, "_live_started", True)
-            except Exception:
-                pass
+            # The following notification results in LIVE too soon - since we are prefetching historical data etc..
+            # # Notify LIVE for this consumer immediately (mirrors original behavior)
+            # try:
+            #     if not getattr(consumer, "_live_started", False) and hasattr(consumer, "put_notification"):
+            #         consumer.put_notification(consumer.LIVE)  # type: ignore[attr-defined]
+            #         setattr(consumer, "_live_started", True)
+            # except Exception:
+            #     pass
             ws = self.ws
             # If first subscriber for this key and connection is active, send subscribe immediately
             should_send = self.connected and len(s) == 1
