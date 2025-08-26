@@ -9,6 +9,9 @@ import backtrader as bt
 from datetime import datetime, timezone
 from openalgo_bt.feeds.oa import OAData
 
+# Avoid static analysis errors for bt.TimeFrame.Minutes while remaining runtime-correct
+TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+
 
 class PrintLive(bt.Strategy):
     def __init__(self):
@@ -54,8 +57,8 @@ def main():
 
     data = OAData(
         symbol=symbol,
-        timeframe=bt.TimeFrame.Minutes,
-        compression=1,             # 1-minute bars
+        timeframe=TF_MINUTES,
+        compression=15,            # 15-minute bars (aggregated locally from 1m)
         # Historical warmup range (optional). If omitted, feed defaults to last 365 days.
         fromdate=datetime(2025, 8, 8),
         # todate=...,

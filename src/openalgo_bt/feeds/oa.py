@@ -137,10 +137,13 @@ class _WSConnection:
             key = (exch or "NSE", sym)
             with conn.lock:
                 consumers = list(conn.subscribers.get(key, set()))
+            # Parse per-tick qty and cumulative volume if present
+            qty = conn._parse_quantity(msg)
+            cumvol = conn._parse_cum_volume(msg)
             for c in consumers:
                 try:
                     # Each OAData aggregates ticks into its own 1m bar
-                    c._handle_tick(price, dt_utc)
+                    c._handle_tick(price, dt_utc, qty, cumvol)
                 except Exception:
                     pass
 
@@ -336,6 +339,68 @@ class _WSConnection:
         return None
 
     @staticmethod
+    def _parse_quantity(msg: Any) -> Optional[float]:
+        """
+        Return per-tick traded quantity if present.
+        Prefer 'last_quantity' (Zerodha style) or 'ltq'/'last_traded_quantity'.
+        Do NOT use cumulative 'volume' here.
+        """
+        if not isinstance(msg, dict):
+            return None
+        # Prefer last trade qty style fields
+        for k in ("last_quantity", "ltq", "last_traded_quantity", "quantity", "qty", "q"):
+            v = msg.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        # Try nested 'data'
+        d = msg.get("data")
+        if isinstance(d, dict):
+            for k in ("last_quantity", "ltq", "last_traded_quantity", "quantity", "qty", "q"):
+                v = d.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+        return None
+
+    @staticmethod
+    def _parse_cum_volume(msg: Any) -> Optional[float]:
+        """
+        Return cumulative session volume if present (e.g., 'volume' from quotes).
+        """
+        if not isinstance(msg, dict):
+            return None
+        for k in ("volume", "v"):
+            v = msg.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        d = msg.get("data")
+        if isinstance(d, dict):
+            for k in ("volume", "v"):
+                v = d.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+        return None
+
+    @staticmethod
     def _extract_timestamp(msg: Any) -> Any:
         ts = None
         for k in ("timestamp", "ts", "time", "t"):
@@ -455,6 +520,20 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         self._cur_bar = None
         self._live_started = False
         self._effective_symbol: Optional[str] = None
+        self._prev_cumvol: Optional[float] = None
+        self._cumvol_minute_start: Optional[float] = None
+        self._bucket_minutes: int = 1
+
+        # Hint Backtrader's resampler about our base timeframe/compression
+        try:
+            # Common attributes used by Backtrader resampler
+            self._timeframe = self.p.timeframe
+            self._compression = int(self.p.compression)
+            # Also expose public attrs some code paths may inspect
+            self.timeframe = self._timeframe
+            self.compression = self._compression
+        except Exception:
+            pass
 
     # -------------
     # BT Lifecycle
@@ -477,11 +556,26 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         todate: datetime = self.p.todate or datetime.now(tz=timezone.utc)
         fromdate: datetime = self.p.fromdate or (todate - timedelta(days=365))
 
-        # Determine interval
+        # Determine interval (with fallback to 1m + local resampling for unsupported compressions)
+        local_resample_minutes = 0
         if self.p.interval:
             interval = self.p.interval
         else:
-            interval = self._store.bt_to_interval(self.p.timeframe, int(self.p.compression))  # type: ignore
+            # Map to backend interval, but normalize intraday to 1m for local resampling if compression>1
+            tf_minutes = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+            tf_hours = getattr(getattr(bt, "TimeFrame", object), "Hours", 2)
+            comp = int(self.p.compression)
+            try:
+                interval = self._store.bt_to_interval(self.p.timeframe, comp)  # type: ignore
+            except Exception:
+                interval = "1m" if (self.p.timeframe == tf_minutes or self.p.timeframe == tf_hours) else "D"
+            # If timeframe is Minutes/Hours with compression>1, force 1m and set local resampling
+            if self.p.timeframe == tf_minutes and comp > 1:
+                interval = "1m"
+                local_resample_minutes = comp
+            elif self.p.timeframe == tf_hours and comp >= 1:
+                interval = "1m"
+                local_resample_minutes = max(60, 60 * comp)
         self._interval = interval
 
         # Fetch historical candles
@@ -492,6 +586,37 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
             interval=interval,
             exchange=self.p.exchange,
         )
+        # If no candles returned and we attempted a backend interval >1m, fallback to 1m and resample locally
+        if (not candles) and (str(interval).lower() not in {"1m", "1min", "1minute"}):
+            tf_minutes = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+            tf_hours = getattr(getattr(bt, "TimeFrame", object), "Hours", 2)
+            comp = int(self.p.compression)
+            if (self.p.timeframe == tf_minutes and comp > 1) or (self.p.timeframe == tf_hours and comp >= 1):
+                try:
+                    candles_1m: List[Dict[str, Any]] = self._store.fetch_historical(  # type: ignore
+                        symbol=self._effective_symbol,
+                        start=fromdate,
+                        end_date=todate,
+                        interval="1m",
+                        exchange=self.p.exchange,
+                    )
+                    # Set resample bucket
+                    if self.p.timeframe == tf_minutes:
+                        local_resample_minutes = max(1, comp)
+                    else:
+                        local_resample_minutes = max(60, 60 * comp)
+                    candles = candles_1m
+                    self._interval = "1m"
+                except Exception:
+                    pass
+
+        # Optional local resampling from 1m to N-minute buckets when backend interval is unavailable
+        if local_resample_minutes and local_resample_minutes > 1:
+            try:
+                candles = self._resample_candles_minutes(candles, int(local_resample_minutes))
+            except Exception:
+                # Fallback: leave as-is on any error
+                pass
 
         # Load into internal queue (convert datetimes to UTC naive for BT date2num)
         is_daily = str(interval).upper() in {"D", "1D", "DAY", "DAILY"}
@@ -516,8 +641,19 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
                 }
             )
 
-        # Start live mode if requested and interval is 1m
-        if self.p.live and str(self._interval).lower() in {"1m", "1min", "1minute"}:
+        # Configure live aggregation bucket (in minutes) based on timeframe/compression
+        tf_minutes = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+        tf_hours = getattr(getattr(bt, "TimeFrame", object), "Hours", 2)
+        comp = int(self.p.compression)
+        if self.p.timeframe == tf_minutes:
+            self._bucket_minutes = max(1, comp)
+        elif self.p.timeframe == tf_hours:
+            self._bucket_minutes = max(60, 60 * comp)
+        else:
+            self._bucket_minutes = 1
+
+        # Start live mode for intraday timeframes (Minutes/Hours)
+        if self.p.live and (self.p.timeframe == tf_minutes or self.p.timeframe == tf_hours):
             self._start_ws()
 
     def stop(self):
@@ -718,7 +854,74 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         return local_close.astimezone(timezone.utc).replace(tzinfo=None)
 
     # -------------
-    # Live WebSocket - 1m Aggregation
+    # Local resampling helpers
+    # -------------
+    @staticmethod
+    def _floor_to_bucket_minute(dt_ist: datetime, bucket_minutes: int) -> datetime:
+        """
+        Floor an aware datetime in IST to the start of its bucket size in minutes.
+        Assumes dt_ist has second=0 and microsecond=0 already.
+        """
+        try:
+            bm = int(bucket_minutes) if bucket_minutes and int(bucket_minutes) > 0 else 1
+        except Exception:
+            bm = 1
+        m = dt_ist.minute - (dt_ist.minute % bm)
+        return dt_ist.replace(minute=m, second=0, microsecond=0)
+
+    def _resample_candles_minutes(self, candles: List[Dict[str, Any]], bucket_minutes: int) -> List[Dict[str, Any]]:
+        """
+        Resample a list of 1-minute candles (IST tz) into N-minute buckets.
+        Candles are expected sorted ascending by datetime. Returns new list with aggregated OHLCV.
+        The returned candle 'datetime' is bucket start time in Asia/Kolkata TZ.
+        """
+        try:
+            from zoneinfo import ZoneInfo  # Python 3.9+
+            tz_ist = ZoneInfo("Asia/Kolkata")
+        except Exception:
+            tz_ist = None
+
+        buckets: Dict[datetime, Dict[str, Any]] = {}
+        ordered_keys: List[datetime] = []
+
+        for c in candles:
+            dt = c.get("datetime")
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    # Treat naive as UTC then convert to IST if possible
+                    dt_ist = dt.replace(tzinfo=timezone.utc).astimezone(tz_ist) if tz_ist else dt
+                else:
+                    dt_ist = dt.astimezone(tz_ist) if tz_ist else dt
+            else:
+                # Skip if no datetime
+                continue
+
+            minute_ist = dt_ist.replace(second=0, microsecond=0)
+            key = self._floor_to_bucket_minute(minute_ist, bucket_minutes)
+
+            b = buckets.get(key)
+            if b is None:
+                b = {
+                    "datetime": key,
+                    "open": float(c.get("open", 0.0) or 0.0),
+                    "high": float(c.get("high", 0.0) or 0.0),
+                    "low": float(c.get("low", 0.0) or 0.0),
+                    "close": float(c.get("close", 0.0) or 0.0),
+                    "volume": float(c.get("volume", 0.0) or 0.0),
+                    "openinterest": float(c.get("openinterest", 0.0) or 0.0),
+                }
+                buckets[key] = b
+                ordered_keys.append(key)
+            else:
+                b["high"] = max(b["high"], float(c.get("high", b["high"]) or b["high"]))
+                b["low"] = min(b["low"], float(c.get("low", b["low"]) or b["low"]))
+                b["close"] = float(c.get("close", b["close"]) or b["close"])
+                b["volume"] = b.get("volume", 0.0) + float(c.get("volume", 0.0) or 0.0)
+
+        return [buckets[k] for k in ordered_keys]
+
+    # -------------
+    # Live WebSocket - Intraday Aggregation (1m or N-minute)
     # -------------
     def _start_ws(self) -> None:
         ws_url = self.p.ws_url or os.getenv("WEBSOCKET_URL")
@@ -796,10 +999,12 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
                     pass
                 return
 
-            # Extract price and timestamp
+            # Extract price and quantities and timestamp
             price = self._parse_price(msg)
             if price is None:
                 return
+            qty = self._parse_quantity(msg)
+            cumvol = self._parse_cum_volume(msg)
 
             # Timestamp extraction
             ts = None
@@ -837,7 +1042,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
                 dt_utc = datetime.now(tz=timezone.utc)
                 print(f"Exception in on_message : {e}")
 
-            self._handle_tick(price, dt_utc)
+            self._handle_tick(price, dt_utc, qty, cumvol)
 
         def on_error(ws, error):
             # Backoff a bit on errors
@@ -866,7 +1071,7 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
             if not self._ws_stop.is_set():
                 time.sleep(1.0)
 
-    def _handle_tick(self, price: float, dt_utc: datetime) -> None:
+    def _handle_tick(self, price: float, dt_utc: datetime, qty: Optional[float] = None, cumvol: Optional[float] = None) -> None:
         # Convert UTC -> IST and floor to minute
         try:
             from zoneinfo import ZoneInfo
@@ -881,21 +1086,46 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
             dt_ist = dt_utc + timedelta(hours=5, minutes=30)
 
         minute_ist = dt_ist.replace(second=0, microsecond=0)
+        bucket_ist = self._floor_to_bucket_minute(minute_ist, int(getattr(self, "_bucket_minutes", 1)))
 
         with self._lock:
             # If minute changed, finalize previous bar
-            if self._cur_minute is not None and minute_ist != self._cur_minute and self._cur_bar:
+            if self._cur_minute is not None and bucket_ist != self._cur_minute and self._cur_bar:
                 self._finalize_minute(self._cur_minute)
 
+            # Determine per-tick add quantity using preferred last trade qty.
+            # If not present, fall back to delta of cumulative volume.
+            add_qty = 0.0
+            try:
+                cv = float(cumvol) if cumvol is not None else None
+                if qty is not None:
+                    add_qty = max(0.0, float(qty))
+                    # Keep cumulative volume tracker in sync if available
+                    if cv is not None:
+                        self._prev_cumvol = cv
+                else:
+                    if cv is not None:
+                        if self._prev_cumvol is not None and cv >= self._prev_cumvol:
+                            add_qty = max(0.0, cv - self._prev_cumvol)
+                        # Update previous cumulative volume for next tick
+                        self._prev_cumvol = cv
+            except Exception:
+                add_qty = 0.0
+
             # Initialize bar if needed
-            if self._cur_minute != minute_ist or not self._cur_bar:
-                self._cur_minute = minute_ist
+            if self._cur_minute != bucket_ist or not self._cur_bar:
+                self._cur_minute = bucket_ist
+                # Mark session cumulative volume at the start of this minute (if available)
+                try:
+                    self._cumvol_minute_start = float(cumvol) if cumvol is not None else self._prev_cumvol
+                except Exception:
+                    self._cumvol_minute_start = self._prev_cumvol
                 self._cur_bar = {
                     "open": float(price),
                     "high": float(price),
                     "low": float(price),
                     "close": float(price),
-                    "volume": 0.0,
+                    "volume": float(add_qty),
                     "openinterest": 0.0,
                 }
                 # Notify LIVE once
@@ -910,17 +1140,30 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
                 self._cur_bar["close"] = float(price)
                 self._cur_bar["high"] = max(self._cur_bar["high"], float(price))
                 self._cur_bar["low"] = min(self._cur_bar["low"], float(price))
+                # Accumulate volume if available
+                self._cur_bar["volume"] = self._cur_bar.get("volume", 0.0) + float(add_qty)
 
     def _finalize_minute(self, minute_ist: datetime) -> None:
         # Convert minute start in IST to naive UTC for Backtrader
         dt_naive_utc = minute_ist.astimezone(timezone.utc).replace(tzinfo=None)
+        # Prefer minute volume from cumulative session volume deltas if available
+        vol_agg = self._cur_bar.get("volume", 0.0) if self._cur_bar else 0.0
+        vol_final = vol_agg
+        try:
+            if self._prev_cumvol is not None and self._cumvol_minute_start is not None:
+                delta = self._prev_cumvol - self._cumvol_minute_start
+                if delta >= 0:
+                    vol_final = float(delta)
+        except Exception:
+            pass
+
         bar = {
             "datetime": dt_naive_utc,
             "open": self._cur_bar.get("open", 0.0) if self._cur_bar else 0.0,
             "high": self._cur_bar.get("high", 0.0) if self._cur_bar else 0.0,
             "low": self._cur_bar.get("low", 0.0) if self._cur_bar else 0.0,
             "close": self._cur_bar.get("close", 0.0) if self._cur_bar else 0.0,
-            "volume": self._cur_bar.get("volume", 0.0) if self._cur_bar else 0.0,
+            "volume": vol_final,
             "openinterest": self._cur_bar.get("openinterest", 0.0) if self._cur_bar else 0.0,
         }
         self._q.append(bar)
@@ -946,6 +1189,66 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         d = msg.get("data")
         if isinstance(d, dict):
             for k in ("ltp", "last_price", "price", "close", "p"):
+                v = d.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+        return None
+
+    def _parse_quantity(self, msg: Any) -> Optional[float]:
+        """
+        Return per-tick traded quantity if present. Prefer 'last_quantity', 'ltq', etc.
+        """
+        if not isinstance(msg, dict):
+            return None
+        # Try direct fields
+        for k in ("last_quantity", "ltq", "last_traded_quantity", "quantity", "qty", "q"):
+            v = msg.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        # Try nested 'data'
+        d = msg.get("data")
+        if isinstance(d, dict):
+            for k in ("last_quantity", "ltq", "last_traded_quantity", "quantity", "qty", "q"):
+                v = d.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+        return None
+
+    def _parse_cum_volume(self, msg: Any) -> Optional[float]:
+        """
+        Return cumulative session volume if present.
+        """
+        if not isinstance(msg, dict):
+            return None
+        # Try direct fields
+        for k in ("volume", "v"):
+            v = msg.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        # Try nested 'data'
+        d = msg.get("data")
+        if isinstance(d, dict):
+            for k in ("volume", "v"):
                 v = d.get(k)
                 if isinstance(v, (int, float)):
                     return float(v)

@@ -6,6 +6,9 @@ import backtrader as bt
 from datetime import datetime, timezone
 from openalgo_bt.feeds.oa import OAData
 
+# Avoid static analysis errors for bt.TimeFrame.Minutes while remaining runtime-correct
+TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+
 
 class PrintBars(bt.Strategy):
     def __init__(self):
@@ -45,11 +48,11 @@ def main():
 
     data = OAData(
         symbol="NSE:JSWENERGY",
-        timeframe=bt.TimeFrame.Days,
-        compression=1,
-        fromdate=datetime(2025, 1, 1),
-        todate=datetime(2025, 2, 1),
-        # interval="D",  # optionally override timeframe/compression mapping
+        timeframe=TF_MINUTES,
+        compression=5,
+        fromdate=datetime(2025, 1, 8),
+        todate=datetime(2025, 1, 10),
+        # interval="1m",  # optionally override timeframe/compression mapping
         # api_key="...",  # optionally override env
         # host="http://127.0.0.1:5000",
     )

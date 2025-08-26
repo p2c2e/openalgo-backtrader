@@ -1,6 +1,6 @@
 [project]
 name = "openalgo-backtrader"
-version = "0.1.6"
+version = "0.1.7"
 description = "Backtrader integration for OpenAlgo (India) - stores, feeds, and brokers"
 authors = [
     { name = "Sudharsan Rangarajan", email = "sudharsan.rangarajan@gmail.com" }

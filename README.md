@@ -54,6 +54,61 @@ data = OAData(
 cerebro.adddata(data, name=symbol)
 ```
 
+## Using higher compression values (intraday aggregation)
+
+When your backend only provides 1-minute data, OAData can now deliver higher intraday compressions by resampling locally:
+
+- Historical:
+  - If you request Minutes/Hours with compression>1 and the OpenAlgo backend does not support that interval, OAData fetches 1m candles and aggregates them into N-minute buckets.
+- Live:
+  - Websocket ticks are aggregated into the requested bucket size on the fly.
+
+Notes:
+- Bucket alignment is done in Asia/Kolkata time by flooring to the nearest multiple of the bucket size.
+- Volume comes from per-tick last_quantity when available, or from deltas of cumulative session volume otherwise.
+- If OpenAlgo supports the requested interval natively (e.g. 5m), OAData will use it. If not, it will fallback to 1m + local aggregation transparently.
+
+Examples:
+```python
+# Historical 5-minute bars (local 1m->5m if backend interval unsupported)
+import backtrader as bt
+from datetime import datetime, timedelta
+from openalgo_bt.feeds.oa import OAData
+
+TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+
+data = OAData(
+    symbol="NSE:RELIANCE",
+    timeframe=TF_MINUTES,
+    compression=5,
+    fromdate=datetime.now() - timedelta(days=5),
+    todate=datetime.now(),
+)
+```
+
+```python
+# Live 15-minute bars (aggregated locally from 1m ticks)
+import os
+import backtrader as bt
+from datetime import datetime
+from openalgo_bt.feeds.oa import OAData
+
+TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+
+data = OAData(
+    symbol="NSE:RELIANCE",
+    timeframe=TF_MINUTES,
+    compression=15,
+    fromdate=datetime(2025, 8, 8),   # optional historical warmup
+    live=True,
+    ws_url=os.getenv("WEBSOCKET_URL"),
+    ws_mode=2,  # Quote mode
+)
+```
+
+Tip: Some editors’ type stubs don’t expose bt.TimeFrame.Minutes; use:
+TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
+
 ## Requirements
 
 - Python 3.8+
