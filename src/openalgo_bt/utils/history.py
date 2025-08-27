@@ -66,14 +66,18 @@ def history(symbol, start, end_date, interval="D", exchange=None, use_cache=Fals
     if not isinstance(df, pd.DataFrame) or df.empty:
         return  # No data
 
-    # Ensure datetime index and convert to Asia/Kolkata timezone
+    # Ensure datetime index and normalize to UTC naive for Backtrader
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
-    # If index is naive, localize to UTC then convert; else just convert
+    # If index is naive, assume UTC; if tz-aware, convert to UTC
     if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
+        df.index = df.index.tz_localize("UTC")
     else:
-        df.index = df.index.tz_convert("Asia/Kolkata")
+        df.index = df.index.tz_convert("UTC")
+    # Backtrader expects naive UTC datetime index
+    df.index = df.index.tz_localize(None)
+    # Ensure chronological order
+    df.sort_index(inplace=True)
 
     # Yield each row as a dict
     for idx, row in df.iterrows():
