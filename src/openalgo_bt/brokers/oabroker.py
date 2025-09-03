@@ -138,6 +138,9 @@ class OABroker(bt.BrokerBase):
     def getcash(self):
         return self._cash
 
+    def get_cash(self):
+        return self._cash
+
     def setcash(self, amount):
         """
         Set the broker's starting cash. This is required for Backtrader compatibility.
@@ -175,6 +178,9 @@ class OABroker(bt.BrokerBase):
             pass
         return value
 
+    def get_value(self, datas=None):
+        return self.getvalue(datas)
+    
     def getcommissioninfo(self, data):
         # Default: Backtrader handles commission via sizers/commission schemes if set
         return super().getcommissioninfo(data)
@@ -555,6 +561,56 @@ class OABroker(bt.BrokerBase):
         # Optional: mark notification boundary like IBBroker
         self._notifs.append(None)
 
+
+    def patched_order_status(self, orderid):
+        """
+        Returns the order status for the given orderid, and always calculates the weighted average price
+        from the tradebook entries for this orderid as 'average_price'.
+        If the order is 'complete', also sets the 'price' field to this weighted average price.
+        The denominator is the sum of 'quantity' from the tradebook entries.
+        """
+        try:
+            tradebook_resp = self._client.tradebook() 
+            print(tradebook_resp)
+        except Exception as e:
+            print(f"Error fetching trade book: {e}")
+            tradebook_resp = None
+
+        trades = []
+        if tradebook_resp:
+            if isinstance(tradebook_resp, dict):
+                data = tradebook_resp.get("data")
+                # data is a list of dictionaries with orderid as a key
+                if isinstance(data, list):
+                    trades = data
+
+        grouped_trades = {}
+        for entry in trades:
+            oid = str(entry.get("orderid"))
+            grouped_trades.setdefault(oid, []).append(entry)
+
+        status = self._client.orderstatus(order_id=orderid, strategy="BackTrader Polling")
+        data = status.get("data") if isinstance(status, dict) else None
+
+        # Calculate weighted average price from tradebook
+        trades_for_order = grouped_trades.get(str(orderid), [])
+        total_qty = 0.0
+        weighted_sum = 0.0
+        for trade in trades_for_order:
+            qty = float(trade.get("quantity", 0))
+            avg_price = float(trade.get("average_price", trade.get("price", 0)))
+            weighted_sum += qty * avg_price
+            total_qty += qty
+
+        wavg_price = weighted_sum / total_qty if total_qty > 0 else 0.0
+
+        if isinstance(data, dict):
+            patched = dict(data)
+            patched["average_price"] = round(wavg_price, 2)
+            if patched.get("order_status", "").lower() == "complete":
+                patched["price"] = round(wavg_price, 2)
+            return patched
+        return data if data else status
     # -----------------------------
     # Polling helpers
     # -----------------------------
@@ -566,71 +622,7 @@ class OABroker(bt.BrokerBase):
             status = None
             price = None
             try:
-                resp = None
-                if self._client and hasattr(self._client, "orderstatus"):
-                    # Preferred: python client method if available
-                    # print("----------->>>>>>")
-                    resp = self._client.orderstatus(order_id=str(oa_id), strategy=self.p.strategy) 
-                elif self._client and hasattr(self._client, "get_order_status"):
-                    # Alternate signature used by some integrations
-                    resp = self._client.get_order_status(order_id=str(oa_id), strategy=self.p.strategy)
-                elif self._client and hasattr(self._client, "orderbook"):
-                    # Fallback: fetch entire orderbook and locate this order id
-                    ob = self._client.orderbook()
-                    cand = None
-                    try:
-                        data = ob.get("data") if isinstance(ob, dict) else None
-                        orders = data.get("orders") if isinstance(data, dict) else None
-                        if isinstance(orders, list):
-                            for o in orders:
-                                if not isinstance(o, dict):
-                                    continue
-                                oid = o.get("orderid") or o.get("order_id") or o.get("id")
-                                if oid is not None and str(oid) == str(oa_id):
-                                    cand = o
-                                    break
-                    except Exception:
-                        cand = None
-                    resp = cand
-                elif self._client and hasattr(self._client, "get_order_book"):
-                    # Alternate: get_order_book variant
-                    ob = self._client.get_order_book()
-                    cand = None
-                    try:
-                        data = ob.get("data") if isinstance(ob, dict) else None
-                        orders = data.get("orders") if isinstance(data, dict) else None
-                        if isinstance(orders, list):
-                            for o in orders:
-                                if not isinstance(o, dict):
-                                    continue
-                                oid = o.get("orderid") or o.get("order_id") or o.get("id")
-                                if oid is not None and str(oid) == str(oa_id):
-                                    cand = o
-                                    break
-                    except Exception:
-                        cand = None
-                    resp = cand
-                elif self._client and hasattr(self._client, "order_book"):
-                    # Alternate: order_book variant
-                    ob = self._client.order_book()
-                    cand = None
-                    try:
-                        data = ob.get("data") if isinstance(ob, dict) else None
-                        orders = data.get("orders") if isinstance(data, dict) else None
-                        if isinstance(orders, list):
-                            for o in orders:
-                                if not isinstance(o, dict):
-                                    continue
-                                oid = o.get("orderid") or o.get("order_id") or o.get("id")
-                                if oid is not None and str(oid) == str(oa_id):
-                                    cand = o
-                                    break
-                    except Exception:
-                        cand = None
-                    resp = cand
-                else:
-                    resp = None
-
+                resp = self.patched_order_status(orderid=str(oa_id))
                 status, price = self._parse_status(resp)
             except Exception:
                 status = None
