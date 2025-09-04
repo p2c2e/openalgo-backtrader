@@ -571,7 +571,7 @@ class OABroker(bt.BrokerBase):
         """
         try:
             tradebook_resp = self._client.tradebook() 
-            print(tradebook_resp)
+            # print(tradebook_resp)
         except Exception as e:
             print(f"Error fetching trade book: {e}")
             tradebook_resp = None
