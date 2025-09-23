@@ -10,7 +10,7 @@ load_dotenv()
 # Initialize OpenAlgo client
 client = api(
     api_key=os.getenv('OPENALGO_API_KEY'),  # Set OPENALGO_API_KEY in your .env file
-    host='http://127.0.0.1:5000'
+    host=os.getenv('OPENALGO_API_HOST')
 )
 
 def history(symbol, start, end_date, interval="D", exchange=None, use_cache=False):
@@ -87,7 +87,19 @@ def history(symbol, start, end_date, interval="D", exchange=None, use_cache=Fals
 
 from diskcache import Cache
 
-ltpbulk_cache = Cache('/Users/sudranga1/workspace/openalgo_strategies/cache/ltp_bulk/')
+from pathlib import Path
+import os
+
+cache_dir = Path.home() / ".openalgo_bt_cache"
+cache_dir.mkdir(exist_ok=True)
+
+
+ltpbulk_cache = Cache(cache_dir / "ltp_bulk")
+
+ltp_cache = Cache(cache_dir / "ltp")
+
+# 9:30am price fetcher with cache
+morn_cache = Cache(cache_dir / "930am")
 
 @ltpbulk_cache.memoize(name='ltp_bulk')
 def fetch_ltp_bulk(symbols, current_date):
@@ -102,9 +114,6 @@ def fetch_ltp_bulk(symbols, current_date):
         except Exception as e:
             ltp_dict[symbol] = None
     return ltp_dict
-
-
-ltp_cache = Cache('/Users/sudranga1/workspace/openalgo_strategies/cache/ltp/')
 
 @ltp_cache.memoize(name='ltp')
 def get_ltp(symbol, current_date):
@@ -134,9 +143,6 @@ def get_ltp(symbol, current_date):
     except Exception as e:
         print(f"Error fetching LTP from OpenAlgo API for {symbol} on {query_date}: {e}")
         raise ValueError(f"LTP fetch failed: {symbol} on {query_date}: {e}")
-
-# 9:30am price fetcher with cache
-morn_cache = Cache('/Users/sudranga1/workspace/openalgo_strategies/cache/930am/')
 
 @morn_cache.memoize(name='930am')
 def fetch_930am_price(symbol, date):
