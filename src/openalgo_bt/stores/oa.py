@@ -1,6 +1,7 @@
 import os
-from typing import Iterable, List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, FrozenSet, Tuple
 from datetime import datetime
+
 from dotenv import load_dotenv
 
 # Backtrader is optional at runtime for this store helper (we only reference constants)
@@ -9,11 +10,7 @@ try:
 except Exception:  # pragma: no cover
     bt = None  # Allows using this module without BT installed for linting/type-checking
 
-# OpenAlgo Python client
-from openalgo import api
-
-# Reuse existing project utilities for historical data
-from openalgo_bt.utils.history import history as oa_history
+from openalgo_bt.adapters.openalgo import OpenAlgoAdapter, normalize_history_candles
 
 
 class OAStore:
@@ -54,10 +51,12 @@ class OAStore:
         if not self.api_key:
             raise ValueError("OPENALGO_API_KEY is not set. Configure it in your environment or .env file.")
 
-        # Initialize OpenAlgo client
-        self.client = api(api_key=self.api_key, host=self.host)
+        # Initialize OpenAlgo adapter and expose the raw SDK client for broker compatibility.
+        self.adapter = OpenAlgoAdapter(api_key=self.api_key, host=self.host)
+        self.client = self.adapter.client
         # Cached broker instance (lazy)
         self._broker = None
+        self._available_intervals: Optional[FrozenSet[str]] = None
 
     # -------------------------
     # Timeframe/Compression Map
@@ -68,8 +67,8 @@ class OAStore:
         Convert Backtrader timeframe/compression to OpenAlgo interval string.
 
         Supported:
-          - Minutes: 1, 3, 5, 10, 15, 30  -> '1m', '3m', '5m', '10m', '15m', '30m'
-          - Hours:   1                    -> '1h'
+          - Minutes: 1, 3, 5, 10, 15, 30, 60 -> OpenAlgo minute interval
+          - Backtrader represents hourly bars as Minutes with compression 60.
           - Days:    any compression (1)  -> 'D'
 
         Raises ValueError for unsupported combinations.
@@ -80,15 +79,11 @@ class OAStore:
         tf_days = getattr(bt.TimeFrame, "Days", 3) if bt else 3
 
         if timeframe == tf_minutes:
-            valid = {1: "1m", 3: "3m", 5: "5m", 10: "10m", 15: "15m", 30: "30m"}
+            valid = {1: "1m", 3: "3m", 5: "5m", 10: "10m", 15: "15m", 30: "30m", 60: "60m"}
             if compression in valid:
                 return valid[compression]
             raise ValueError(f"Unsupported minutes compression for OpenAlgo: {compression}")
 
-        if timeframe == tf_hours:
-            if compression == 1:
-                return "1h"
-            raise ValueError(f"Unsupported hours compression for OpenAlgo: {compression}")
 
         if timeframe == tf_days:
             # OpenAlgo daily interval is 'D'
@@ -96,13 +91,79 @@ class OAStore:
 
         raise ValueError(f"Unsupported timeframe/compression for OpenAlgo: timeframe={timeframe}, compression={compression}")
 
+    def available_intervals(self, *, refresh: bool = False) -> FrozenSet[str]:
+        """Return normalized intervals advertised by the OpenAlgo target.
+
+        The result is cached per store instance. Callers must explicitly request
+        refresh when a server-side capability change should be observed.
+        """
+        cached = getattr(self, "_available_intervals", None)
+        if cached is not None and not refresh:
+            return cached
+
+        response = self.adapter.intervals()
+        data = response.data if hasattr(response, "data") else response.get("data", response)
+        if not isinstance(data, dict):
+            raise ValueError("OpenAlgo intervals response must contain an object")
+
+        intervals = {
+            str(interval).strip()
+            for values in data.values()
+            if isinstance(values, (list, tuple, set))
+            for interval in values
+            if isinstance(interval, str) and interval.strip()
+        }
+        if not intervals:
+            raise ValueError("OpenAlgo intervals response did not contain supported intervals")
+
+        self._available_intervals = frozenset(intervals)
+        return self._available_intervals
+
+    def supports_interval(self, interval: str, *, refresh: bool = False) -> bool:
+        """Return whether the target explicitly advertises ``interval``."""
+        return interval in self.available_intervals(refresh=refresh)
+
+    def resolve_interval(
+        self,
+        timeframe: Any,
+        compression: int,
+        *,
+        refresh: bool = False,
+    ) -> Tuple[str, int]:
+        """Choose a native interval or a documented 1-minute aggregation fallback.
+
+        Returns ``(interval, local_resample_minutes)``. A zero resample value
+        means the requested interval is natively advertised by the server.
+        """
+        tf_minutes = getattr(bt.TimeFrame, "Minutes", 1) if bt else 1
+        tf_hours = getattr(bt.TimeFrame, "Hours", 2) if bt else 2
+        tf_days = getattr(bt.TimeFrame, "Days", 3) if bt else 3
+        if timeframe == tf_minutes:
+            requested = f"{int(compression)}m"
+        elif timeframe == tf_days:
+            requested = "D"
+        else:
+            raise ValueError(
+                f"Unsupported timeframe/compression for OpenAlgo: timeframe={timeframe}, compression={compression}"
+            )
+
+        if self.supports_interval(requested, refresh=refresh):
+            return requested, 0
+
+        if timeframe == tf_minutes and compression > 1 and self.supports_interval("1m"):
+            return "1m", int(compression)
+
+        raise ValueError(
+            f"OpenAlgo target does not advertise {requested!r} and no supported 1m fallback exists"
+        )
+
     # -------------------------
     # Helpers
     # -------------------------
     @staticmethod
-    def _dt_key(candle: Dict[str, Any]) -> datetime:
+    def _dt_key(candle: Dict[str, Any]) -> float:
         dt = candle.get("datetime")
-        return dt if isinstance(dt, datetime) else datetime.min
+        return dt.timestamp() if isinstance(dt, datetime) else 0.0
 
     # -------------------------
     # Historical Data
@@ -141,19 +202,36 @@ class OAStore:
                 raise ValueError("Either interval or both timeframe and compression must be provided")
             interval = self.bt_to_interval(timeframe, compression)
 
-        # Use the project's tested utils.history.history generator to ensure consistent tz handling
-        candles_iter = oa_history(
-            symbol=symbol,
-            start=start,
-            end_date=end_date,
+        parsed_exchange, parsed_symbol = self._split_symbol_exchange(symbol, exchange)
+        response = self.adapter.history(
+            symbol=parsed_symbol,
+            exchange=parsed_exchange,
             interval=interval,
-            exchange=exchange,
+            start_date=self._date_str(start),
+            end_date=self._date_str(end_date),
         )
-        candles = list(candles_iter)
+        candles = normalize_history_candles(response)
 
         # Sort defensively by datetime
         candles.sort(key=self._dt_key)
         return candles
+
+    @staticmethod
+    def _date_str(value: datetime | str) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        return str(value)
+
+    @staticmethod
+    def _split_symbol_exchange(symbol: str, exchange: Optional[str]) -> tuple[str, str]:
+        parsed_exchange = None
+        parsed_symbol = symbol
+        if isinstance(symbol, str) and ":" in symbol:
+            parts = symbol.split(":", 1)
+            if len(parts) == 2:
+                parsed_exchange, parsed_symbol = parts[0], parts[1]
+        final_exchange = exchange if exchange else (parsed_exchange if parsed_exchange else "NSE")
+        return final_exchange, parsed_symbol
 
     # -------------------------
     # Direct Client Access

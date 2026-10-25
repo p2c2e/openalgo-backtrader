@@ -17,6 +17,18 @@ from openalgo_bt.stores.oa import OAStore
 from openalgo_bt.feeds.oa import OAData
 ```
 
+## Current modernization plan
+
+This repo is being refreshed because the OpenAlgo API and broker integrations may have evolved since the original Backtrader integration was written.
+
+Tracking documents:
+
+- `docs/updatation-plan.md` - overall plan, phases, status, and release milestones
+- `docs/compatibility.md` - compatibility matrix for OpenAlgo, Backtrader, Python, intervals, websocket, and broker features
+- `docs/task-log.md` - running log of intermediate tasks and findings
+
+Status is tracked with `[todo]`, `[doing]`, `[done]`, `[deferred]`, and `[blocked]` markers.
+
 ## Project Structure
 
 - `openalgo_bt/` - Main package
@@ -111,10 +123,16 @@ TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.12+
 - [python-dotenv](https://pypi.org/project/python-dotenv/)
 - [backtrader](https://www.backtrader.com/) (user must install)
 - [openalgo](https://github.com/openalgo/openalgo-python) (user must install)
+
+Development test command:
+
+```bash
+uv run pytest
+```
 
 ## License
 

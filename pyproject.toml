@@ -1,18 +1,23 @@
 [project]
 name = "openalgo-backtrader"
-version = "0.1.11"
+version = "0.1.12"
 description = "Backtrader integration for OpenAlgo (India) - stores, feeds, and brokers"
 authors = [
     { name = "Sudharsan Rangarajan", email = "sudharsan.rangarajan@gmail.com" }
 ]
 readme = "README.md"
 license-files = ["LICENSE"] 
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = [
     "openalgo>=1.0.29",
     "python-dotenv",
     "diskcache",
     # "backtrader",  # Optional: user may install separately
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
 ]
 
 [project.urls]
@@ -30,3 +35,8 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "backtrader>=1.9.78.123",
+]

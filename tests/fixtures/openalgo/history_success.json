@@ -1,0 +1,14 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "timestamp": 1722839400,
+      "open": 100.0,
+      "high": 101.0,
+      "low": 99.5,
+      "close": 100.5,
+      "volume": 1000,
+      "oi": 0
+    }
+  ]
+}

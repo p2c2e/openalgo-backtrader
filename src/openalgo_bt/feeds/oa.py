@@ -562,21 +562,10 @@ class OAData(bt.feed.DataBase):  # type: ignore[misc]
         if self.p.interval:
             interval = self.p.interval
         else:
-            # Map to backend interval, but normalize intraday to 1m for local resampling if compression>1
-            tf_minutes = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
-            tf_hours = getattr(getattr(bt, "TimeFrame", object), "Hours", 2)
-            comp = int(self.p.compression)
-            try:
-                interval = self._store.bt_to_interval(self.p.timeframe, comp)  # type: ignore
-            except Exception:
-                interval = "1m" if (self.p.timeframe == tf_minutes or self.p.timeframe == tf_hours) else "D"
-            # If timeframe is Minutes/Hours with compression>1, force 1m and set local resampling
-            if self.p.timeframe == tf_minutes and comp > 1:
-                interval = "1m"
-                local_resample_minutes = comp
-            elif self.p.timeframe == tf_hours and comp >= 1:
-                interval = "1m"
-                local_resample_minutes = max(60, 60 * comp)
+            interval, local_resample_minutes = self._store.resolve_interval(  # type: ignore
+                self.p.timeframe,
+                int(self.p.compression),
+            )
         self._interval = interval
 
         # Fetch historical candles

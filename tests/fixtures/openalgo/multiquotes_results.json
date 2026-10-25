@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "results": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "ltp": 100.5
+    }
+  ]
+}
