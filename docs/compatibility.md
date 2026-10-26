@@ -148,7 +148,7 @@ Fill this table as probes and integration tests are run.
 - Wheel and source distribution passed `twine check --strict` and clean Python 3.12.12 installations with dependency consistency checks.
 - Adapter/store/feed/history imports passed without optional Backtrader; adding Backtrader 1.9.78.123 also enabled broker imports. Both clean installs resolved OpenAlgo 2.0.5. Imports ran with dotenv loading disabled and outbound sockets blocked.
 - These checks establish packaging/import compatibility only, not deployed SDK, websocket, paper-order or live-order compatibility. The development suite passed 521 offline tests with two existing Backtrader SyntaxWarnings.
-- Examples remain repository-only and are included with their tests and guide in the reviewed release source. Publication is approved; clean committed-source validation and PyPI upload are pending.
+- Examples remain repository-only and are included with their tests and guide in the reviewed release source. Release commit `002cb7b348e132aa229f1e9e647e2faceb3e84f4` and annotated tag `v0.1.12` are pushed. Both distributions are published on PyPI; downloaded SHA-256 hashes match the validated clean-commit build. See `docs/task-log.md`.
 
 ## Next Updates
 
