@@ -6,6 +6,7 @@ Backtrader integration for OpenAlgo (India) - stores, feeds, and brokers.
 
 ```bash
 uv pip install openalgo-backtrader
+uv pip install backtrader  # Required to run Backtrader strategies
 ```
 
 ## Usage
@@ -16,6 +17,29 @@ Import the package in your code as follows:
 from openalgo_bt.stores.oa import OAStore
 from openalgo_bt.feeds.oa import OAData
 ```
+
+## Local five-minute simulation
+
+The examples are repository-only and are not installed by the wheel or included
+in the source distribution. Clone the repository before running these commands:
+
+```bash
+git clone https://github.com/p2c2e/openalgo-backtrader.git
+cd openalgo-backtrader
+```
+
+Try the self-contained SMA crossover example before adding custom strategy helpers:
+
+```bash
+uv sync --extra dev
+uv run python examples/sma_crossover_5m.py
+uv run python examples/sma_crossover_5m.py --broker oa-sim
+```
+
+Both modes keep orders local. The default uses synthetic data and ordinary
+Backtrader next-bar-open fills; `oa-sim` tests OABroker's immediate current-close
+fills, not realistic execution. Read [the example guide](examples/sma_crossover_5m.md)
+for optional read-only OpenAlgo history, JSON reports and limitations.
 
 ## Current modernization plan
 
@@ -38,20 +62,41 @@ Status is tracked with `[todo]`, `[doing]`, `[done]`, `[deferred]`, and `[blocke
 
 
 ### Sample Store/Broker Creation
-Here is how to setup a Store/Broker (example tested with Zerodha backend at OpenAlgo). Both blocks are for "LIVE" setup
+
+This development release is not validated for production live trading. Offline
+broker tests do not verify a deployed OpenAlgo order contract, and websocket
+behavior remains experimental.
+
+For local integration simulation with an existing `cerebro` instance and exported
+OpenAlgo configuration:
+
 ```python
 from openalgo_bt.stores.oa import OAStore
+
 store = OAStore()
 broker = store.getbroker(
-    product="MIS", 
-    strategy="Live Consistent Trend Bracket", 
-    debug=True,
-    simulate_fills=False,  # Use real broker for live trading
-    use_funds=False        # Use local cash management
+    product="MIS",
+    strategy="Local Integration Simulation",
+    mode="backtest",
+    simulate_fills=True,
+    use_funds=False,
 )
 cerebro.setbroker(broker)
 ```
-And to setup a Data (or multiple for that matter)
+
+Simulation fills immediately at the current close; it is not a realistic execution
+model. Store construction still requires an API key. Use the self-contained
+synthetic example above when no OpenAlgo configuration is available.
+
+Non-simulated backtest orders are rejected. Paper routing requires `mode="paper"`
+and an OpenAlgo analyzer response identifying an analyze/paper target with
+`analyze_mode` enabled. Live routing additionally requires `mode="live"`,
+`allow_live=True`, `OPENALGO_BT_ALLOW_LIVE=1`, and a matching live analyzer state.
+These checks are safeguards, not evidence of live-trading readiness. Process
+restart recovery and atomic account reconciliation are unsupported.
+
+The following live-data configuration is illustrative only; verify websocket
+authentication and subscriptions against your intended deployment before use.
 
 ```python
 data = OAData(
@@ -118,7 +163,7 @@ data = OAData(
 )
 ```
 
-Tip: Some editors’ type stubs don’t expose bt.TimeFrame.Minutes; use:
+Tip: Some editors' type stubs don't expose bt.TimeFrame.Minutes; use:
 TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
 
 ## Requirements
@@ -126,7 +171,7 @@ TF_MINUTES = getattr(getattr(bt, "TimeFrame", object), "Minutes", 1)
 - Python 3.12+
 - [python-dotenv](https://pypi.org/project/python-dotenv/)
 - [backtrader](https://www.backtrader.com/) (user must install)
-- [openalgo](https://github.com/openalgo/openalgo-python) (user must install)
+- [openalgo](https://github.com/openalgo/openalgo-python) (installed automatically)
 
 Development test command:
 

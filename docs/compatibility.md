@@ -126,6 +126,13 @@ Fill this table as probes and integration tests are run.
 - The quiet window is a heuristic: unknown fills appearing after cleanup can still be missed. Explicit incomplete or contradictory evidence may remain pending indefinitely. Price corrections, truncated tradebooks, process restart, and intentional paper/live verification remain separate work.
 - Deterministic coverage is in `tests/test_broker_terminal_settlement.py`. The full offline suite passed 139 tests, with ten repeated settlement/cancellation/lifecycle runs and no monitor thread leaks. No live orders were sent.
 
+## Five-Minute Local Simulation Example (Offline)
+
+- `examples/sma_crossover_5m.py` runs a long-only SMA crossover with deterministic synthetic session bars by default. Both selectable brokers are local-only: ordinary Backtrader next-bar-open execution and OABroker immediate-current-close integration simulation, with zero fees/slippage.
+- Optional exported-credential history requests use only native `5m` REST history through OpenAlgoAdapter, `load_env=False`, and an inert SDK client. The historical adapter never reaches the simulated broker. No live historical fetch or order probe was performed for this example.
+- Signal/fill timing, cash/value, no-trade and margin cases, invalid input, fake history transport, and final-bar undelivered notifications are covered by 66 real-Cerebro/offline tests in `tests/test_sma_crossover_example.py`. Final order snapshots distinguish alive orders from already-completed fills whose strategy notification was not delivered; trade/drawdown analyzers are not rewritten.
+- Full validation passed 521 tests with two existing Backtrader SyntaxWarnings, five repeated example runs, both text/JSON CLI modes, and zero monitor leaks. Outbound socket connections and implicit dotenv loading were blocked. Neither this diagnostic nor passing offline tests establishes production live-trading readiness.
+
 ## Known Compatibility Risks
 
 - Websocket authentication key name may have changed or may differ between docs and implementation.
@@ -134,6 +141,14 @@ Fill this table as probes and integration tests are run.
 - Broker-level interval validation may accept intervals that the underlying broker cannot actually serve.
 - Live trading should not be enabled without checking analyzer/paper/live mode first.
 - Websocket protocol has not been verified against this target.
+
+## Release Packaging Validation
+
+- Version 0.1.12 explicitly uses `setuptools>=77` with `setuptools.build_meta`; no Hatchling migration is required.
+- Wheel and source distribution passed `twine check --strict` and clean Python 3.12.12 installations with dependency consistency checks.
+- Adapter/store/feed/history imports passed without optional Backtrader; adding Backtrader 1.9.78.123 also enabled broker imports. Both clean installs resolved OpenAlgo 2.0.5. Imports ran with dotenv loading disabled and outbound sockets blocked.
+- These checks establish packaging/import compatibility only, not deployed SDK, websocket, paper-order or live-order compatibility. The development suite passed 521 offline tests with two existing Backtrader SyntaxWarnings.
+- Examples remain repository-only and are included with their tests and guide in the reviewed release source. Publication is approved; clean committed-source validation and PyPI upload are pending.
 
 ## Next Updates
 

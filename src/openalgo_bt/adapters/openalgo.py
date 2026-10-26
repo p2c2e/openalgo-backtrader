@@ -414,8 +414,10 @@ class OpenAlgoAdapter:
         client: Any = None,
         timeout: float = 10.0,
         http_post: Optional[Callable[[str, dict[str, Any], float], Any]] = None,
+        *,
+        load_env: bool = True,
     ) -> None:
-        if load_dotenv:
+        if load_env and load_dotenv:
             load_dotenv()
         self.api_key = api_key or os.getenv("OPENALGO_API_KEY")
         self.host = host or os.getenv("OPENALGO_API_HOST", self.DEFAULT_HOST)

@@ -206,3 +206,22 @@ Status legend:
 - [done] Added deterministic concurrency, rolling-window, cooldown/header, adapter/raw-client, fairness, restart and shutdown coverage in `tests/test_adapter_rate_limits.py` and `tests/test_broker_rate_limiting.py`.
 - [done] Verified 455 offline tests (two existing Backtrader SyntaxWarnings), ten repeated 99-test rate/lifecycle/recovery runs, and zero broker monitor leaks. Outbound socket connections were blocked and dotenv loading disabled. No live orders were sent. Version remains 0.1.12; nothing was published.
 - [todo] IP-wide/distributed quotas, deployed quota discovery, write idempotency/ambiguous placement recovery, process restart persistence and deliberate paper/live contracts remain separate work. Very small read budgets can prevent paired order reads or complete account refreshes. See `docs/DESIGN.broker-rate-limiting.md`.
+
+
+### Five-minute SMA crossover local diagnostic
+
+- [done] Added a written design, self-contained example, matching scriptinfo and README commands. Synthetic weekday-session data is the default; both broker modes use local orders with zero fees/slippage and no routing adapter.
+- [done] Added default-preserving adapter `load_env=False` opt-out and a REST-only optional native `5m` history path using exported credentials and explicit dates. No live history or order probe was run.
+- [done] Added 66 offline example cases covering real Cerebro round trips, next-open versus current-close execution, account reporting, pending guards, margin rejection, invalid inputs, session alignment, fake history requests and CLI safety.
+- [done] Fixed the test module loader's Backtrader `sys.modules` registration requirement and used tight approximate price comparisons for floating-point aggregate executions.
+- [done] Discovered last-bar immediate fills can precede strategy notification delivery. Exposed final order status/execution separately from alive pending orders and documented delivered-notification-only analyzers without adding a fake bar or flushing notifications.
+- [done] Verified 521 offline tests (two existing Backtrader SyntaxWarnings), five repeated example runs, both text/JSON CLI modes and zero monitor leaks, with outbound sockets and implicit dotenv blocked. Default 300-bar runs completed five closed trades for each broker. Version stays 0.1.12; no commit or publication.
+
+### PyPI release preparation
+
+- [done] Declared `setuptools>=77` and `setuptools.build_meta` explicitly, preserving existing source-layout discovery. The minimum supports the existing PEP 639 `license-files` field.
+- [done] Corrected README routing guidance to local simulation and documented paper/live guards, experimental websocket behavior, unsupported process recovery, and repository-only examples. Trading defaults and source behavior are unchanged by this preparation.
+- [done] Rebuilt version 0.1.12 wheel and sdist; both passed `twine check --strict`. Clean Python 3.12.12 installs passed socket-blocked imports without Backtrader and with Backtrader 1.9.78.123. Both artifact installs resolved OpenAlgo 2.0.5 and passed `uv pip check`; this is import compatibility, not a live SDK contract test.
+- [done] Re-ran 521 offline tests with dotenv disabled and outbound sockets blocked (two existing Backtrader SyntaxWarnings). Archive inspection found no dotenv, desktop, or bytecode-cache paths. PyPI still reports 0.1.11; 0.1.12 was unused at validation time.
+- [done] User approved release review, commit/tag and PyPI publication. Reviewed the packaging changes together with the referenced local simulation example, its tests, documentation and default-preserving adapter opt-out. Only these related paths are included; local credentials and generated files remain excluded.
+- [doing] Commit the reviewed source, rebuild and validate from a clean Git export, then tag/push and upload version 0.1.12. Publication will be recorded after PyPI confirms both artifacts.

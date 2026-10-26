@@ -224,8 +224,8 @@ Tasks:
   - `cache`
   - `dev` [done initial pytest entry]
 - [todo] Avoid requiring `diskcache` unless cache support is requested.
-- [todo] Add build-system config if needed for consistent builds.
-- [todo] Confirm `uv build` works.
+- [done] Declared `setuptools>=77` and `setuptools.build_meta` explicitly for source-layout builds and the existing `license-files` metadata.
+- [done] Confirmed `uv build` produces the 0.1.12 wheel and source distribution; both passed strict Twine metadata checks. See `docs/task-log.md`.
 - [done] Confirm `uv run --extra dev pytest tests/test_openalgo_adapter.py tests/test_store.py` works after initial tests are added.
 
 Deliverables:
@@ -385,7 +385,7 @@ Goal: make ongoing maintenance and diagnosis safe and inexpensive.
 - [todo] Add CI for dependency sync, offline tests, linting, static analysis, package build, and install smoke tests.
 - [todo] Add coverage reporting and establish a threshold focused on adapter, feed, broker, and state-transition code.
 - [todo] Move Backtrader, websocket, cache, and development dependencies to documented optional extras as appropriate.
-- [todo] Verify `uv build` and install the built wheel in a clean environment.
+- [done] Verified `uv build` and clean Python 3.12.12 wheel/sdist installs with socket-blocked imports and dependency checks. Optional Backtrader absence was also tested for adapter/store/feed/history imports. See `docs/task-log.md`.
 - [todo] Add structured, redacted logs and metrics for REST latency, reconnects, subscriptions, queue depth, stale feeds, order transitions, reconciliation differences, and API errors.
 - [todo] Document operational runbooks for invalid credentials, endpoint incompatibility, data gaps, websocket outage, stuck order state, reconciliation mismatch, and safe shutdown.
 - [todo] Run an opt-in paper-trading soak test covering multiple symbols, reconnects, cancellation, fills, partial fills when available, and process restart recovery.
